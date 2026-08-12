@@ -43,9 +43,11 @@ RUN pip install --no-cache-dir \
 print('unsloth', m.version('unsloth'), '| unsloth_zoo', m.version('unsloth_zoo'), \
 '| torch', m.version('torch'), '| trl', m.version('trl'), '| peft', m.version('peft'))"
 
-# Repo code is small and changes often. Baking it makes the image self-sufficient; the run
-# script still rsyncs over /workspace/training-pipe so you can iterate without a rebuild.
-WORKDIR /workspace/training-pipe
+# Code lives in /opt, NOT /workspace. A pod mounts its persistent volume at /workspace, which
+# mounts straight over anything baked there -- code copied to /workspace/training-pipe in the
+# image is invisible the moment the pod starts. /opt survives the mount; the run script seeds
+# /workspace from it at boot.
+WORKDIR /opt/training-pipe
 COPY src/ ./src/
 COPY configs/ ./configs/
 COPY scripts/ ./scripts/
@@ -66,4 +68,7 @@ PY
 EOF
 RUN chmod +x /usr/local/bin/verify-stack
 
-CMD ["/bin/bash"]
+# Must stay /start.sh. That is the base image's own command: it provisions authorized_keys
+# from the PUBLIC_KEY env var and starts sshd. Overriding it with a shell produces a pod that
+# reports RUNNING and refuses every SSH connection, with no error anywhere to explain why.
+CMD ["/start.sh"]

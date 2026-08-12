@@ -16,8 +16,14 @@ cd "$(dirname "$0")/.."
 CONFIG=configs/training_agentic_minicpm5_1b_h100_q4.json
 DATASET=data/formatted/agentic_sft_minicpm5.jsonl
 EVALSET=data/formatted/agentic_eval_minicpm5.jsonl
-GPU_TYPE="NVIDIA H100 80GB HBM3"
-IMAGE="${IMAGE:-runpod/pytorch:1.1.0-rc.154-cu1290-torch291-ubuntu2404}"
+GPU_TYPE="${GPU_TYPE:-NVIDIA H100 80GB HBM3}"
+# The frozen base from .github/workflows/build-base-image.yml. Deps are already installed, so
+# there is no pip step on the pod -- that is the whole point of the image.
+IMAGE="${IMAGE:-ghcr.io/pronitdas/training-pipe:base}"
+# Only needed while the GHCR package is private: a RunPod "container registry credential" ID
+# (create one in the RunPod console with your GitHub username + a PAT holding read:packages).
+# Leave empty if the package is public.
+REGISTRY_ID="${REGISTRY_ID:-}"
 SSH_KEY=/home/pronit/.runpod/ssh/RunPod-Key-Go
 REMOTE=/workspace/training-pipe
 
@@ -57,6 +63,7 @@ if [ -z "$POD_ID" ]; then
             \"disk\": 100,
             \"ports\": [\"22/tcp\", \"8000/http\"],
             \"env\": {\"HF_HOME\": \"/workspace/huggingface\", \"PUBLIC_KEY\": \"$PUBKEY\"},
+            ${REGISTRY_ID:+\"registry\": \"$REGISTRY_ID\",}
             \"mounts\": {\"persistent\": {\"size\": 100, \"path\": \"/workspace\"}}
         }")
         POD_ID=$(echo "$RESP" | jqp "print(d.get('id',''))")
@@ -69,8 +76,10 @@ else
     echo "[1/6] Reusing pod $POD_ID"
 fi
 
-echo "[2/6] Waiting for SSH..."
-for i in $(seq 1 60); do
+# 60x10s was not enough for a cold pull of a ~10GB image; the pod reports RUNNING long before
+# the container is up, and ports appear later still.
+echo "[2/6] Waiting for SSH (first pull of a cold image can take ~15 min)..."
+for i in $(seq 1 150); do
     INFO=$(api "https://api.runpod.io/v2/pods/$POD_ID")
     # runtime.ports is a list of {ip, private, public, type}; runtime itself is null until
     # networking is assigned, a few minutes after the pod first reports RUNNING.
@@ -87,15 +96,17 @@ for p in (rt.get('ports') or []):
             break
         fi
     fi
-    [ $((i % 6)) -eq 0 ] && echo "  ...still booting ($i/60)"
+    [ $((i % 12)) -eq 0 ] && echo "  ...still booting ($i/150)"
     sleep 10
 done
 [ -n "${IP:-}" ] || { echo "ERROR: pod never became reachable"; exit 1; }
 
 SSHC="ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no root@$IP"
 
-echo "[3/6] Uploading code + data (244MB, compressed in transit)..."
-$SSHC "mkdir -p $REMOTE/data/formatted $REMOTE/output"
+echo "[3/6] Seeding /workspace from the image, then uploading data..."
+# The image bakes code at /opt/training-pipe because the persistent volume mounts over
+# /workspace. Copy it across, then rsync only what differs locally.
+$SSHC "cp -rn /opt/training-pipe/. $REMOTE/ 2>/dev/null; mkdir -p $REMOTE/data/formatted $REMOTE/output"
 rsync -rlptz --no-o --no-g --exclude '__pycache__' --exclude 'unsloth_compiled_cache' \
     --info=progress2 -e "ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no" \
     src configs scripts root@"$IP":$REMOTE/
@@ -103,21 +114,25 @@ rsync -rlptz --no-o --no-g --exclude '__pycache__' --exclude 'unsloth_compiled_c
     --info=progress2 -e "ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no" \
     "$DATASET" "$EVALSET" root@"$IP":$REMOTE/data/formatted/
 
-echo "[4/6] Installing deps + prefetching the base model (parallel)..."
-$SSHC "cd $REMOTE && nohup bash -c '
-    pip install -q unsloth unsloth_zoo 2>&1
-    pip install -q datasets trl peft bitsandbytes accelerate 2>&1
-    python -c \"from huggingface_hub import snapshot_download; snapshot_download(\\\"openbmb/MiniCPM5-1B\\\")\"
-    touch /workspace/.setup_done
-' > /workspace/setup.log 2>&1 &"
+# No pip step: the image ships the stack. Verify it against the real GPU before spending an
+# hour on a broken pod, then prefetch weights (deliberately not baked, so one image serves
+# every model in the ladder).
+echo "[4/6] Verifying stack + prefetching base model..."
+$SSHC "verify-stack" || { echo "ERROR: image stack is broken on this GPU"; exit 1; }
 
-for i in $(seq 1 90); do
+MODEL=$(python3 -c "import json;print(json.load(open('$CONFIG'))['model_name'])")
+$SSHC "nohup python -c \"
+from huggingface_hub import snapshot_download
+snapshot_download('$MODEL')
+open('/workspace/.setup_done','w').close()
+\" > /workspace/setup.log 2>&1 &"
+
+for i in $(seq 1 60); do
     $SSHC "test -f /workspace/.setup_done" 2>/dev/null && break
-    [ $((i % 6)) -eq 0 ] && echo "  ...installing ($i/90): $($SSHC 'tail -1 /workspace/setup.log' 2>/dev/null | tail -c 90)"
+    [ $((i % 6)) -eq 0 ] && echo "  ...downloading $MODEL ($i/60)"
     sleep 10
 done
-$SSHC "test -f /workspace/.setup_done" || { echo "ERROR: setup did not finish; check /workspace/setup.log"; exit 1; }
-echo "  deps ready: $($SSHC "python -c 'import unsloth,torch;print(\"unsloth\",unsloth.__version__,\"torch\",torch.__version__)'" 2>/dev/null | tail -1)"
+$SSHC "test -f /workspace/.setup_done" || { echo "ERROR: model download stalled; see /workspace/setup.log"; exit 1; }
 
 echo "[5/6] Launching training (3 epochs, q4, effective batch 16)..."
 $SSHC "cd $REMOTE && nohup python src/train/train_unsloth.py --config $CONFIG --no-wandb \
