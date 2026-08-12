@@ -1,0 +1,14 @@
+# Keep the build context tiny and keep personal data out of image layers.
+data/
+output/
+.venv/
+.venv-train/
+unsloth_compiled_cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.omo/
+.codegraph
+.git/
+uv.lock
+*.log

@@ -1,0 +1,18 @@
+# Personal conversation corpus — mined from opencode.db and Claude transcripts. Never commit;
+# this is the whole reason the repo is private and the reason this rule sits at the top.
+data/
+output/
+
+# Environments and caches
+.venv/
+.venv-train/
+unsloth_compiled_cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.omo/
+.codegraph
+
+# Local scratch
+*.log
+/tmp/
