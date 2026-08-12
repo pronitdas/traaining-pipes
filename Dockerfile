@@ -29,12 +29,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Unsloth pins its own transformers/trl; let it resolve rather than fighting it. Versions are
 # pinned so a rebuild six months from now produces the same trainer that produced the weights.
+#
+# Do NOT `import unsloth` here. unsloth_zoo resolves the accelerator at import time and raises
+# NotImplementedError("Unsloth cannot find any torch accelerator? You need a GPU.") on a
+# CPU-only machine -- which every CI builder is. The import check belongs at runtime on the
+# pod (see verify-stack below); at build time we can only assert the packages are present.
 RUN pip install --no-cache-dir \
         unsloth==2026.8.15 \
         unsloth_zoo==2026.8.10 \
     && pip install --no-cache-dir \
         datasets trl peft bitsandbytes accelerate \
-    && python -c "import unsloth, torch; print('unsloth', unsloth.__version__, 'torch', torch.__version__)"
+    && python -c "import importlib.metadata as m; \
+print('unsloth', m.version('unsloth'), '| unsloth_zoo', m.version('unsloth_zoo'), \
+'| torch', m.version('torch'), '| trl', m.version('trl'), '| peft', m.version('peft'))"
 
 # Repo code is small and changes often. Baking it makes the image self-sufficient; the run
 # script still rsyncs over /workspace/training-pipe so you can iterate without a rebuild.

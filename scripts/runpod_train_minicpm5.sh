@@ -96,9 +96,11 @@ SSHC="ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no root@$IP"
 
 echo "[3/6] Uploading code + data (244MB, compressed in transit)..."
 $SSHC "mkdir -p $REMOTE/data/formatted $REMOTE/output"
-rsync -az --info=progress2 -e "ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no" \
+rsync -rlptz --no-o --no-g --exclude '__pycache__' --exclude 'unsloth_compiled_cache' \
+    --info=progress2 -e "ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no" \
     src configs scripts root@"$IP":$REMOTE/
-rsync -az --info=progress2 -e "ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no" \
+rsync -rlptz --no-o --no-g --exclude '__pycache__' --exclude 'unsloth_compiled_cache' \
+    --info=progress2 -e "ssh -i $SSH_KEY -p $PORT -o StrictHostKeyChecking=no" \
     "$DATASET" "$EVALSET" root@"$IP":$REMOTE/data/formatted/
 
 echo "[4/6] Installing deps + prefetching the base model (parallel)..."
